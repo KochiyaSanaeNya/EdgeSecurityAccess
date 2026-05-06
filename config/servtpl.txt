@@ -1,0 +1,6 @@
+##user=$username
+[Peer]
+PublicKey = $userpub
+AllowedIPs = $usrip
+PersistentKeepalive = $keeptime
+##userend
