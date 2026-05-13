@@ -10,7 +10,7 @@ func main() {
 	auth := New("config/users.txt")
 	esacfg := esacfg()
 	if esacfg == nil {
-		log.Println("failed to load config/esa.conf")
+		log.Println("failed to load server configuration")
 		return
 	}
 	go func() {
@@ -25,7 +25,7 @@ func main() {
 			tmpl := "[Interface]\nPrivateKey = $usrpriv\nAddress = $usrip\n[Peer]\nPublicKey = $servpub\nAllowedIPs = $subnet\nEndpoint = $endpoint\nPersistentKeepalive = $keeptime"
 			usercfg := usrcfg(job.username)
 			if usercfg == nil {
-				job.Data <- "User config not found"
+				job.Data <- "Configuration error"
 				close(job.Data)
 				continue
 			}
@@ -57,7 +57,7 @@ func main() {
 			upconfig.wgconfpath = "/etc/wireguard/esa.conf"
 			err := updatewg(&upconfig, "esa")
 			if err != nil {
-				job.Data <- "Failed to update WireGuard peer"
+				job.Data <- "Configuration error"
 				close(job.Data)
 				continue
 			}
