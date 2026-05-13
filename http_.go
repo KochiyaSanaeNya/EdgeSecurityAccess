@@ -10,7 +10,6 @@ import (
 type AuthJob struct {
 	Ok       bool
 	username string
-	password string
 	Data     chan string
 }
 type Auth struct {
@@ -24,7 +23,6 @@ func New(path string) *Auth {
 	if err != nil {
 		panic(err)
 	}
-	defer f.Close()
 	defer f.Close()
 	s := bufio.NewScanner(f)
 	for s.Scan() {
@@ -58,7 +56,6 @@ func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	job := &AuthJob{
 		Ok:       ok,
 		username: u,
-		password: p,
 		Data:     make(chan string),
 	}
 	a.Jobs <- job
