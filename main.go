@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"os"
 )
@@ -9,11 +10,13 @@ func main() {
 	auth := New("config/users.txt")
 	esacfg := esacfg()
 	if esacfg == nil {
+		log.Println("failed to load config/esa.conf")
 		return
 	}
 	go func() {
 		err := http.ListenAndServe(":"+esacfg.HTTPPort, auth)
 		if err != nil {
+			log.Printf("http server stopped: %v", err)
 			return
 		}
 	}()
