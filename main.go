@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"os"
 )
@@ -8,9 +9,14 @@ import (
 func main() {
 	auth := New("config/users.txt")
 	esacfg := esacfg()
+	if esacfg == nil {
+		log.Println("failed to load server configuration")
+		return
+	}
 	go func() {
 		err := http.ListenAndServe(":"+esacfg.HTTPPort, auth)
 		if err != nil {
+			log.Printf("http server stopped: %v", err)
 			return
 		}
 	}()
@@ -18,6 +24,11 @@ func main() {
 		if job.Ok {
 			tmpl := "[Interface]\nPrivateKey = $usrpriv\nAddress = $usrip\n[Peer]\nPublicKey = $servpub\nAllowedIPs = $subnet\nEndpoint = $endpoint\nPersistentKeepalive = $keeptime"
 			usercfg := usrcfg(job.username)
+			if usercfg == nil {
+				job.Data <- "Configuration error"
+				close(job.Data)
+				continue
+			}
 			configStr := os.Expand(tmpl, func(k string) string {
 				switch k {
 				case "usrpriv":
@@ -46,13 +57,16 @@ func main() {
 			upconfig.wgconfpath = "/etc/wireguard/esa.conf"
 			err := updatewg(&upconfig, "esa")
 			if err != nil {
-				return
+				job.Data <- "Configuration error"
+				close(job.Data)
+				continue
 			}
 
 			job.Data <- configStr
 			close(job.Data)
 		} else {
 			job.Data <- "Authentication failed"
+			close(job.Data)
 		}
 	}
 }
