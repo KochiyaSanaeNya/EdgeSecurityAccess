@@ -6,7 +6,7 @@ This server software suite is designed specifically for the Linux operating syst
 
 [Manual of EdgeSecurityAccess (Part I - Basic usage)](https://blog.sanaenya.com/archives/manual-of-edgesecurityaccess-part-i---basic-usage)
 
-#Manual of EdgeSecurityAccess (Part I - Basic usage)
+# Manual of EdgeSecurityAccess (Part I - Basic usage)
 ## Introductory
 
 **EdgeSecurityAccess is a software suite consisting of a series of software components used to quickly set up virtual private networks.**
