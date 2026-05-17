@@ -16,9 +16,9 @@ This server software suite is designed specifically for the Linux operating syst
 - [ ] Recovering can reveal the contents of a panic.  
 **These issues will be fixed within a few version updates.**
 
-[Manual of EdgeSecurityAccess (Part I - Basic usage)](https://blog.sanaenya.com/archives/manual-of-edgesecurityaccess-part-i---basic-usage)
+[Manual of EdgeSecurityAccess (Part I - Basic usage v26.5.1x Version)](https://blog.sanaenya.com/archives/manual-of-edgesecurityaccess-part-i---basic-usage)
 
-# Manual of EdgeSecurityAccess (Part I - Basic usage)
+# Manual of EdgeSecurityAccess (Part I - Basic usage v26.5.1x Version (Old version) )
 ## Introductory
 
 **EdgeSecurityAccess is a software suite consisting of a series of software components used to quickly set up virtual private networks.**
