@@ -84,7 +84,7 @@ Copy the ESAInit program to the configuration folder, run the program, and it wi
 Start the ESA main program , and try accessing the service
 
 ```
-url -X POST --data "username=test&password=test" 127.0.0.1:50001
+curl -X POST --data "username=test&password=test" 127.0.0.1:50001
 ```
 
 If curl returns correctly
