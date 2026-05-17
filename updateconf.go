@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 )
@@ -14,12 +15,16 @@ type upconf struct {
 	status     bool // true = add to tail  | false = find and delete Peer block
 }
 
-func updatewg(conf *upconf, iface string) error {
+func updatewg(ctx context.Context, conf *upconf, iface string) error {
 	if conf.userpublic == "" {
 		return fmt.Errorf("empty public key")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if conf.status {
-		cmd := exec.Command(
+		cmd := exec.CommandContext(
+			ctx,
 			"wg", "set", iface,
 			"peer", conf.userpublic,
 			"allowed-ips", conf.userip,
@@ -31,7 +36,8 @@ func updatewg(conf *upconf, iface string) error {
 		}
 		fmt.Printf("PEER ADDED: %s (%s)\n", conf.username, conf.userip)
 	} else {
-		cmd := exec.Command(
+		cmd := exec.CommandContext(
+			ctx,
 			"wg", "set", iface,
 			"peer", conf.userpublic,
 			"remove",
