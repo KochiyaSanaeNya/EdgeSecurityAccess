@@ -52,6 +52,7 @@ func main() {
 	log.SetFlags(log.LstdFlags)
 
 	auth := New("config/users.txt")
+	auth.StartLimiterCleanup()
 	esacfg := esacfg()
 	if esacfg == nil {
 		log.Println("config load failed")
@@ -75,74 +76,81 @@ func main() {
 		}
 	})
 
+	workerTokens := make(chan struct{}, 8)
 	for job := range auth.Jobs {
-		func(job *AuthJob) {
+		workerTokens <- struct{}{}
+		safeGo(func() {
 			defer func() {
-				if rec := recover(); rec != nil {
-					log.Printf("panic: %v", rec)
-				}
+				<-workerTokens
 			}()
-
-			ctx := job.Ctx
-			if ctx == nil {
-				ctx = context.Background()
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			if job.Ok {
-				tmpl := "[Interface]\nPrivateKey = $usrpriv\nAddress = $usrip\n[Peer]\nPublicKey = $servpub\nAllowedIPs = $subnet\nEndpoint = $endpoint\nPersistentKeepalive = $keeptime"
-				usercfg := usrcfg(job.username)
-				if usercfg == nil {
-					deliver(job, "User not found")
-					return
-				}
-
-				configStr := os.Expand(tmpl, func(k string) string {
-					switch k {
-					case "usrpriv":
-						return usercfg.privatekey
-					case "usrip":
-						return usercfg.ip
-					case "servpub":
-						return esacfg.ServPub
-					case "subnet":
-						return esacfg.Subnet
-					case "endpoint":
-						return esacfg.Endpoint
-					case "keeptime":
-						return esacfg.KeepTime
-					default:
-						return ""
+			func(job *AuthJob) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						log.Printf("panic: %v", rec)
 					}
-				})
+				}()
 
-				var upconfig upconf
-				upconfig.username = job.username
-				upconfig.keeptime = esacfg.KeepTime
-				upconfig.status = true
-				upconfig.userip = usercfg.ip
-				upconfig.userpublic = usercfg.publickey
-				upconfig.wgconfpath = "/etc/wireguard/esa.conf"
-
-				wgCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
-
-				err := updatewg(wgCtx, &upconfig, "esa")
-				if err != nil {
-					log.Println(err)
-					deliver(job, "Internal error")
-					return
+				ctx := job.Ctx
+				if ctx == nil {
+					ctx = context.Background()
 				}
 
-				deliver(job, configStr)
-			} else {
-				deliver(job, "Authentication failed")
-			}
-		}(job)
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				if job.Ok {
+					tmpl := "[Interface]\nPrivateKey = $usrpriv\nAddress = $usrip\n[Peer]\nPublicKey = $servpub\nAllowedIPs = $subnet\nEndpoint = $endpoint\nPersistentKeepalive = $keeptime"
+					usercfg := usrcfg(job.username)
+					if usercfg == nil {
+						deliver(job, "User not found")
+						return
+					}
+
+					configStr := os.Expand(tmpl, func(k string) string {
+						switch k {
+						case "usrpriv":
+							return usercfg.privatekey
+						case "usrip":
+							return usercfg.ip
+						case "servpub":
+							return esacfg.ServPub
+						case "subnet":
+							return esacfg.Subnet
+						case "endpoint":
+							return esacfg.Endpoint
+						case "keeptime":
+							return esacfg.KeepTime
+						default:
+							return ""
+						}
+					})
+
+					var upconfig upconf
+					upconfig.username = job.username
+					upconfig.keeptime = esacfg.KeepTime
+					upconfig.status = true
+					upconfig.userip = usercfg.ip
+					upconfig.userpublic = usercfg.publickey
+					upconfig.wgconfpath = "/etc/wireguard/esa.conf"
+
+					wgCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+
+					err := updatewg(wgCtx, &upconfig, "esa")
+					if err != nil {
+						log.Println(err)
+						deliver(job, "Internal error")
+						return
+					}
+
+					deliver(job, configStr)
+				} else {
+					deliver(job, "Authentication failed")
+				}
+			}(job)
+		})
 	}
 }
