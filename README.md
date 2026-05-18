@@ -7,13 +7,12 @@ This server software suite is designed specifically for the Linux operating syst
 **TODO List:**
 - [ ] Encrypt username and password.
 - [ ] The parsing issue of SplitN in usercfg.go.
-- [ ] No verification was performed on the IP address or WireGuard key.  
+- [x] No verification was performed on the IP address or WireGuard key.  
 - [ ] Architectural risk: User keys are stored on the server (this issue will be resolved in the next software refactoring).  
-- [ ] The goroutine's main loop may be blocked.  
+- [x] The goroutine's main loop may be blocked.  
 - [ ] There is no proper logging and error reporting system.  
 - [ ] Fail2ban is not integrated to protect users.  
-- [ ] Unable to obtain the real IP in reverse proxy scenarios.
-- [ ] Recovering can reveal the contents of a panic.  
+- [x] Unable to obtain the real IP in reverse proxy scenarios.
 **These issues will be fixed within a few version updates.**
 
 [Manual of EdgeSecurityAccess (Part I - Basic usage v26.5.1x Version)](https://blog.sanaenya.com/archives/manual-of-edgesecurityaccess-part-i---basic-usage)
