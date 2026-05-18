@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
+	"regexp"
 )
 
 type upconf struct {
@@ -15,9 +17,31 @@ type upconf struct {
 	status     bool // true = add to tail  | false = find and delete Peer block
 }
 
-func updatewg(ctx context.Context, conf *upconf, iface string) error {
+var wgPubKeyRe = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
+
+func validAllowedIP(value string) bool {
+	if _, _, err := net.ParseCIDR(value); err == nil {
+		return true
+	}
+	return net.ParseIP(value) != nil
+}
+
+func validatePeer(conf *upconf) error {
 	if conf.userpublic == "" {
 		return fmt.Errorf("empty public key")
+	}
+	if !wgPubKeyRe.MatchString(conf.userpublic) {
+		return fmt.Errorf("invalid public key")
+	}
+	if conf.userip == "" || !validAllowedIP(conf.userip) {
+		return fmt.Errorf("invalid allowed IP")
+	}
+	return nil
+}
+
+func updatewg(ctx context.Context, conf *upconf, iface string) error {
+	if err := validatePeer(conf); err != nil {
+		return err
 	}
 	if ctx == nil {
 		ctx = context.Background()
