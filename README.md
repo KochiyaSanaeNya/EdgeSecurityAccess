@@ -4,6 +4,8 @@ This software has not undergone complete software usability testing and producti
 Code security and quality are reviewed and approved by AI.  
 **NOTICE** This project uses artificial intelligence to assist development during the development stage  
 This server software suite is designed specifically for the Linux operating system.  
+[Notice Board](https://blog.sanaenya.com/esa)  
+[Development Updates](esadevstatus.122244.xyz)  
 **TODO List:**
 - [ ] Encrypt username and password.
 - [ ] The parsing issue of SplitN in usercfg.go.
