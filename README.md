@@ -6,16 +6,7 @@
   This server software suite is designed specifically for the Linux operating system.  
   [Notice Board](https://blog.sanaenya.com/esa)  
   [Development Updates](https://esadevstatus.122244.xyz)  
-  **TODO List:**
-
-- [x] Encrypt username and password.  
-
-- [x] The parsing issue of SplitN in usercfg.go.  
-
-- [x] Architectural risk: User keys are stored on the server (this issue will be resolved in the next software refactoring).  
-
-- [x] The goroutine's main loop may be blocked.  
-
+  **TODO List:**  
 - [ ] There is no proper logging and error reporting system.  
 
 - [ ] Fail2ban is not integrated to protect users.  
