@@ -56,7 +56,8 @@ func updatewg(ctx context.Context, conf *upconf, iface string) error {
 		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("add peer failed: %v\n%s", err, string(out))
+			fmt.Printf("WG WARNING (Ignored): add peer failed: %v, out: %s\n", err, string(out))
+			return nil
 		}
 		fmt.Printf("PEER ADDED: %s (%s)\n", conf.username, conf.userip)
 	} else {
@@ -69,7 +70,8 @@ func updatewg(ctx context.Context, conf *upconf, iface string) error {
 
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("remove peer failed: %v\n%s", err, string(out))
+			fmt.Printf("WG WARNING (Ignored): remove peer failed: %v, out: %s\n", err, string(out))
+			return nil
 		}
 
 		fmt.Printf("PEER REMOVED: %s\n", conf.username)

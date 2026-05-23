@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/subtle"
 	"log"
 	"net"
 	"net/http"
@@ -14,11 +13,12 @@ import (
 )
 
 type AuthJob struct {
-	Ok       bool
-	username string
-	password string
-	Data     chan string
-	Ctx      context.Context
+	Ok           bool
+	username     string
+	password     string
+	clientpubkey string
+	Data         chan string
+	Ctx          context.Context
 }
 
 type ipLimiter struct {
@@ -30,10 +30,10 @@ type ipLimiter struct {
 }
 
 type Auth struct {
-	db        map[string]string
-	Jobs      chan *AuthJob
-	mu        sync.Mutex
-	limiters  map[string]*ipLimiter
+	db       map[string]string
+	Jobs     chan *AuthJob
+	mu       sync.Mutex
+	limiters map[string]*ipLimiter
 }
 
 const (
@@ -190,9 +190,11 @@ func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	u := r.PostFormValue("username")
 	p := r.PostFormValue("password")
+	c := r.PostFormValue("pubkey")
 	ok := false
-	if pw, exists := a.db[u]; exists && u != "" {
-		if subtle.ConstantTimeCompare([]byte(pw), []byte(p)) == 1 {
+
+	if pw, exists := a.db[u]; exists {
+		if valid, err := verifyPassword(p, pw); err == nil && valid {
 			ok = true
 		}
 	}
@@ -208,11 +210,12 @@ func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	job := &AuthJob{
-		Ok:       ok,
-		username: u,
-		password: p,
-		Data:     make(chan string, 1),
-		Ctx:      ctx,
+		Ok:           ok,
+		username:     u,
+		password:     p,
+		clientpubkey: c,
+		Data:         make(chan string, 1),
+		Ctx:          ctx,
 	}
 
 	select {

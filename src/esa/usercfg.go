@@ -9,11 +9,9 @@ import (
 )
 
 type UserCfg struct {
-	id         int
-	username   string
-	ip         string
-	publickey  string
-	privatekey string
+	id       int
+	username string
+	ip       string
 }
 
 func usrcfg(tarname string) *UserCfg {
@@ -30,17 +28,15 @@ func usrcfg(tarname string) *UserCfg {
 			continue
 		}
 		parts := strings.Split(line, ":")
-		if len(parts) < 5 {
+		if len(parts) < 3 {
 			continue
 		}
 		if parts[1] == tarname {
 			id, _ := strconv.Atoi(parts[0])
 			return &UserCfg{
-				id:         id,
-				username:   parts[1],
-				ip:         parts[2],
-				publickey:  parts[3],
-				privatekey: parts[4],
+				id:       id,
+				username: parts[1],
+				ip:       parts[2],
 			}
 		}
 	}

@@ -102,7 +102,7 @@ func main() {
 				}
 
 				if job.Ok {
-					tmpl := "[Interface]\nPrivateKey = $usrpriv\nAddress = $usrip\n[Peer]\nPublicKey = $servpub\nAllowedIPs = $subnet\nEndpoint = $endpoint\nPersistentKeepalive = $keeptime"
+					tmpl := "$usrip\n$servpub\n$subnet\n$endpoint\n$keeptime"
 					usercfg := usrcfg(job.username)
 					if usercfg == nil {
 						deliver(job, "User not found")
@@ -111,8 +111,6 @@ func main() {
 
 					configStr := os.Expand(tmpl, func(k string) string {
 						switch k {
-						case "usrpriv":
-							return usercfg.privatekey
 						case "usrip":
 							return usercfg.ip
 						case "servpub":
@@ -133,7 +131,7 @@ func main() {
 					upconfig.keeptime = esacfg.KeepTime
 					upconfig.status = true
 					upconfig.userip = usercfg.ip
-					upconfig.userpublic = usercfg.publickey
+					upconfig.userpublic = job.clientpubkey
 					upconfig.wgconfpath = "/etc/wireguard/esa.conf"
 
 					wgCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

@@ -4,19 +4,33 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "ERROR: Subnet parameter missing!\n")
-		fmt.Fprintf(os.Stderr, "Usage: %s <10.0.0.0/24>\n", os.Args[0])
+	var dirPath string
+	var subnet string
+
+	fmt.Print("Enter directory path: ")
+	_, err := fmt.Scanln(&dirPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR reading path: %v\n", err)
 		os.Exit(1)
 	}
 
-	inputFile, err := os.Open("users.txt")
+	fmt.Print("Enter IP Subnet (e.g., 10.0.0.0/24): ")
+	_, err = fmt.Scanln(&subnet)
+	if err != nil || subnet == "" {
+		fmt.Fprintf(os.Stderr, "ERROR reading subnet: %v\n", err)
+		os.Exit(1)
+	}
+
+	inputFilePath := filepath.Join(dirPath, "users.txt")
+
+	inputFile, err := os.Open(inputFilePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "INVALID FILE: %v\n", err)
+		fmt.Fprintf(os.Stderr, "INVALID FILE PATH [%s]: %v\n", inputFilePath, err)
 		os.Exit(1)
 	}
 	defer inputFile.Close()
@@ -43,7 +57,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	subnet := os.Args[1]
 	if slashPos := strings.Index(subnet, "/"); slashPos != -1 {
 		subnet = subnet[:slashPos]
 	}
@@ -53,9 +66,11 @@ func main() {
 		prefix = subnet[:dotPos+1]
 	}
 
-	outputFile, err := os.Create("usrwg.conf")
+	outputFilePath := filepath.Join(dirPath, "usrwg.conf")
+
+	outputFile, err := os.Create(outputFilePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "CANNOT CREATE OUTPUT FILE: %v\n", err)
+		fmt.Fprintf(os.Stderr, "CANNOT CREATE OUTPUT FILE [%s]: %v\n", outputFilePath, err)
 		os.Exit(1)
 	}
 	defer outputFile.Close()
@@ -74,4 +89,5 @@ func main() {
 	}
 
 	writer.Flush()
+	fmt.Printf("Success: [%s] generated.\n", outputFilePath)
 }
