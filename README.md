@@ -11,8 +11,4 @@
 - [ ] Fail2ban is not integrated to protect users.  
 
   **These issues will be fixed within a few version updates.**  
-  **ESATools will be integrated into this repository.**  
-  [Manual of EdgeSecurityAccess (Part I - Basic usage v26.5.1x Version)](https://blog.sanaenya.com/archives/manual-of-edgesecurityaccess-part-i---basic-usage)  
-
-  
-
+  **After the ESANXT test is completed, a branch merge operation will be initiated, and the operation guide will be rewritten at that time.**  
