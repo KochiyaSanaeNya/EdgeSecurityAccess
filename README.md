@@ -7,7 +7,6 @@
   [Notice Board](https://blog.sanaenya.com/esa)  
   [Development Updates](https://esadevstatus.122244.xyz)  
   **TODO List:**  
-- [ ] There is no proper logging and error reporting system.  
 
 - [ ] Fail2ban is not integrated to protect users.  
 
