@@ -6,7 +6,7 @@
   This server software suite is designed specifically for the Linux operating system.  
   [Notice Board](https://blog.sanaenya.com/esa)  
   [Development Updates](https://esadevstatus.122244.xyz)  
-  [ESANXT](https://github.com/KochiyaSanaeNya/EdgeSecurityAccessNXT)
+  [ESANXT](https://github.com/KochiyaSanaeNya/EdgeSecurityAccessNXT)  
   **TODO List:**  
 
 - [ ] Fail2ban is not integrated to protect users.  
