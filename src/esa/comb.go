@@ -14,7 +14,7 @@ type Config struct {
 	Endpoint string
 	KeepTime string
 	WGPort   uint16
-	HTTPPort string
+	IPPort   string
 	ServPriv string
 	ServPub  string
 }
@@ -26,9 +26,8 @@ func esacfg() *Config {
 		return nil
 	}
 	defer func(content *os.File) {
-		err := content.Close()
-		if err != nil {
-
+		if err := content.Close(); err != nil {
+			logJSON("warn", "config_close_failed", logFields{"err": err.Error()})
 		}
 	}(content)
 	config := &Config{}
@@ -54,15 +53,23 @@ func esacfg() *Config {
 		case "keeptime":
 			config.KeepTime = value
 		case "wgport":
-			vul, _ := strconv.Atoi(value)
+			vul, err := strconv.Atoi(value)
+			if err != nil {
+				logJSON("warn", "config_wgport_invalid", logFields{"value": value})
+				return nil
+			}
 			config.WGPort = uint16(vul)
 		case "httport":
-			config.HTTPPort = value
+			config.IPPort = value
 		case "servpriv":
 			config.ServPriv = value
 		case "servpub":
 			config.ServPub = value
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		logJSON("warn", "config_scan_failed", logFields{"err": err.Error()})
+		return nil
 	}
 	return config
 }
