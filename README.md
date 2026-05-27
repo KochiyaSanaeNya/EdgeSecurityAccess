@@ -7,9 +7,5 @@
   [Notice Board](https://blog.sanaenya.com/esa)  
   [Development Updates](https://esadevstatus.122244.xyz)  
   [ESANXT](https://github.com/KochiyaSanaeNya/EdgeSecurityAccessNXT)  
-  **TODO List:**  
 
-- [ ] Fail2ban is not integrated to protect users.  
-
-  **These issues will be fixed within a few version updates.**  
   **After the ESANXT test is completed, a branch merge operation will be initiated, and the operation guide will be rewritten at that time.**  
