@@ -1,0 +1,4 @@
+##user=$username
+Subnet = $usrip
+Ed25519PublicKey = $userpub
+##userend
