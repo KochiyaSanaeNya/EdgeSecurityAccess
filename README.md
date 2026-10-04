@@ -1,7 +1,8 @@
 # EdgeSecurityAccess
 - WireGuard&Tinc-based rapid networking software  
   This software has not undergone complete software usability testing and production deployment testing, and is strongly discouraged for commercial use or scenarios requiring high stability.  
-  Code security and quality are reviewed and approved by AI.  
+  Code security and quality are reviewed and approved by AI.
+  **Every official release will undergo comprehensive manual testing to prevent AI bias.**
   **NOTICE** This project uses artificial intelligence to assist development during the development stage  
   This server software suite is designed specifically for the Linux operating system.  
   [Notice Board](https://blog.sanaenya.com/esa)  
