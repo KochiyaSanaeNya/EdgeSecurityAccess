@@ -229,6 +229,9 @@ func tincHostPaths(conf *upconf) (string, string, error) {
 	if conf == nil {
 		return "", "", NewValidationError("request", "nil")
 	}
+	if err := ValidateTincName(conf.nodename); err != nil {
+		return "", "", fmt.Errorf("invalid tinc node name: %w", err)
+	}
 	tincDir := filepath.Clean(conf.tincDir)
 	if !isAbsConfigPath(tincDir) {
 		return "", "", fmt.Errorf("tinc dir must be absolute")

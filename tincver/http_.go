@@ -35,15 +35,19 @@ type ipLimiter struct {
 }
 
 type Auth struct {
-	db           map[string]string
-	Jobs         chan *AuthJob
-	limiters     sync.Map
-	nonceMu      sync.Mutex
-	nonces       map[string]time.Time
-	stopCh       chan struct{}
-	stopOnce     sync.Once
-	cleanupWG    sync.WaitGroup
-	limiterCount int64
+	db             map[string]string
+	Jobs           chan *AuthJob
+	limiters       sync.Map
+	limiterMu      sync.Mutex
+	nonceMu        sync.Mutex
+	nonces         map[string]time.Time
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	cleanupMu      sync.Mutex
+	limiterStarted bool
+	nonceStarted   bool
+	cleanupWG      sync.WaitGroup
+	limiterCount   int64
 }
 
 const (
@@ -180,6 +184,7 @@ func New(path string) (*Auth, error) {
 	}(f)
 
 	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 1024), maxBodyBytes)
 
 	lineNo := 0
 
@@ -217,6 +222,9 @@ func New(path string) (*Auth, error) {
 		}
 
 		pwHash := strings.TrimSpace(p[1])
+		if pwHash == "" {
+			return nil, fmt.Errorf("empty password hash for %q at users db line %d", user, lineNo)
+		}
 		if err := ValidatePasswordHashFormat(pwHash); err != nil {
 			return nil, fmt.Errorf("invalid password hash for %q at users db line %d: %w", user, lineNo, err)
 		}
@@ -362,6 +370,13 @@ func (a *Auth) recordSuccess(ip string) {
 }
 
 func (a *Auth) StartLimiterCleanup() {
+	a.cleanupMu.Lock()
+	if a.limiterStarted {
+		a.cleanupMu.Unlock()
+		return
+	}
+	a.limiterStarted = true
+	a.cleanupMu.Unlock()
 
 	a.cleanupWG.Add(1)
 
@@ -387,6 +402,7 @@ func (a *Auth) StartLimiterCleanup() {
 
 				removed := 0
 
+				a.limiterMu.Lock()
 				a.limiters.Range(func(key, value interface{}) bool {
 
 					lim := value.(*ipLimiter)
@@ -407,6 +423,7 @@ func (a *Auth) StartLimiterCleanup() {
 
 					return true
 				})
+				a.limiterMu.Unlock()
 
 				if removed > 0 {
 
@@ -427,6 +444,13 @@ func (a *Auth) StartLimiterCleanup() {
 }
 
 func (a *Auth) StartNonceCleanup() {
+	a.cleanupMu.Lock()
+	if a.nonceStarted {
+		a.cleanupMu.Unlock()
+		return
+	}
+	a.nonceStarted = true
+	a.cleanupMu.Unlock()
 
 	a.cleanupWG.Add(1)
 
@@ -840,20 +864,21 @@ func (a *Auth) ServeHTTP(
 }
 
 func (a *Auth) getLimiter(ip string) (*ipLimiter, bool) {
-	limIface, loaded := a.limiters.LoadOrStore(
-		ip,
-		&ipLimiter{
-			tokens:   burstTokens,
-			last:     time.Now(),
-			lastSeen: time.Now(),
-		},
-	)
-	if !loaded {
-		if atomic.AddInt64(&a.limiterCount, 1) > maxLimiterEntries {
-			a.limiters.Delete(ip)
-			atomic.AddInt64(&a.limiterCount, -1)
-			return nil, false
-		}
+	if limIface, ok := a.limiters.Load(ip); ok {
+		return limIface.(*ipLimiter), true
 	}
-	return limIface.(*ipLimiter), true
+
+	a.limiterMu.Lock()
+	defer a.limiterMu.Unlock()
+	if limIface, ok := a.limiters.Load(ip); ok {
+		return limIface.(*ipLimiter), true
+	}
+	if atomic.LoadInt64(&a.limiterCount) >= maxLimiterEntries {
+		return nil, false
+	}
+	now := time.Now()
+	lim := &ipLimiter{tokens: burstTokens, last: now, lastSeen: now}
+	a.limiters.Store(ip, lim)
+	atomic.AddInt64(&a.limiterCount, 1)
+	return lim, true
 }

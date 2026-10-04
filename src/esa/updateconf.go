@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,14 +25,16 @@ type upconf struct {
 var wgPubKeyRe = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
 
 const (
-	wgSaveDebounce   = 1 * time.Second
-	wgSaveTimeout    = 5 * time.Second
-	minIPv4MaskBits  = 24
-	minIPv6MaskBits  = 64
+	wgSaveDebounce  = 1 * time.Second
+	wgSaveTimeout   = 5 * time.Second
+	minIPv4MaskBits = 24
+	minIPv6MaskBits = 64
 )
 
 var (
 	wgSaveOnce    sync.Once
+	wgSaveMu      sync.Mutex
+	wgSaveStopped bool
 	wgSaveCh      chan wgSaveRequest
 	wgSaveQueueCh chan wgSaveRequest
 	wgSaveStopCh  chan struct{}
@@ -87,7 +91,11 @@ func startWGSaver() {
 					timer.Reset(wgSaveDebounce)
 				case <-timer.C:
 					for _, req := range pending {
-						wgSaveQueueCh <- req
+						select {
+						case wgSaveQueueCh <- req:
+						case <-wgSaveStopCh:
+							return
+						}
 					}
 					for k := range pending {
 						delete(pending, k)
@@ -105,9 +113,15 @@ func startWGSaver() {
 }
 
 func stopWGSaver() {
+	wgSaveMu.Lock()
+	defer wgSaveMu.Unlock()
 	if wgSaveStopCh == nil {
 		return
 	}
+	if wgSaveStopped {
+		return
+	}
+	wgSaveStopped = true
 	select {
 	case <-wgSaveStopCh:
 		return
@@ -162,14 +176,20 @@ func validateAllowedIP(value string) bool {
 }
 
 func validatePeer(conf *upconf) error {
-	if conf.userpublic == "" {
-		return fmt.Errorf("empty public key")
+	if conf == nil {
+		return fmt.Errorf("peer config is nil")
 	}
-	if !wgPubKeyRe.MatchString(conf.userpublic) {
-		return fmt.Errorf("invalid public key")
+	if err := ValidatePubKey(conf.userpublic); err != nil {
+		return fmt.Errorf("invalid public key: %w", err)
 	}
-	if conf.userip == "" || !validAllowedIP(conf.userip) || !validateAllowedIP(conf.userip) {
-		return fmt.Errorf("invalid allowed IP")
+	if err := ValidatePeerIP(conf.userip); err != nil {
+		return fmt.Errorf("invalid allowed IP: %w", err)
+	}
+	if keepalive := strings.TrimSpace(conf.keeptime); keepalive != "" {
+		value, err := strconv.Atoi(keepalive)
+		if err != nil || value < 0 || value > 65535 {
+			return fmt.Errorf("invalid persistent keepalive")
+		}
 	}
 	return nil
 }
@@ -181,14 +201,20 @@ func persistWG(ctx context.Context, iface string, confPath string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if strings.TrimSpace(iface) == "" || strings.ContainsAny(iface, "\r\n\t ") {
+		return fmt.Errorf("invalid interface name")
+	}
 	cmd := exec.CommandContext(ctx, "wg-quick", "save", iface)
-	out, err := cmd.CombinedOutput()
+	var output limitedCommandOutput
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := cmd.Run()
 	if err != nil {
 		logJSON("error", "wg_save_failed", logFields{
 			"iface":    iface,
 			"confPath": confPath,
 			"err":      err.Error(),
-			"out":      string(out),
+			"out":      output.String(),
 		})
 		return fmt.Errorf("wg-quick save failed: %v", err)
 	}
@@ -198,16 +224,20 @@ func persistWG(ctx context.Context, iface string, confPath string) error {
 
 func updatewg(ctx context.Context, conf *upconf, iface string) error {
 	if err := validatePeer(conf); err != nil {
-		logJSON("warn", "peer_validation_failed", logFields{
-			"user":        conf.username,
-			"ip":          conf.userip,
-			"pubkey_hash": pubKeyHash(conf.userpublic),
-			"err":         err.Error(),
-		})
+		fields := logFields{"err": err.Error()}
+		if conf != nil {
+			fields["user"] = conf.username
+			fields["ip"] = conf.userip
+			fields["pubkey_hash"] = pubKeyHash(conf.userpublic)
+		}
+		logJSON("warn", "peer_validation_failed", fields)
 		return err
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if strings.TrimSpace(iface) == "" || strings.ContainsAny(iface, "\r\n\t ") {
+		return fmt.Errorf("invalid interface name")
 	}
 	if conf.status {
 		args := []string{
@@ -256,4 +286,32 @@ func updatewg(ctx context.Context, conf *upconf, iface string) error {
 	}
 
 	return nil
+}
+
+type limitedCommandOutput struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (output *limitedCommandOutput) Write(data []byte) (int, error) {
+	const maxBytes = 16 * 1024
+	remaining := maxBytes - output.buffer.Len()
+	if remaining > 0 {
+		if len(data) > remaining {
+			_, _ = output.buffer.Write(data[:remaining])
+			output.truncated = true
+		} else {
+			_, _ = output.buffer.Write(data)
+		}
+	} else if len(data) > 0 {
+		output.truncated = true
+	}
+	return len(data), nil
+}
+
+func (output *limitedCommandOutput) String() string {
+	if output.truncated {
+		return output.buffer.String() + "... [truncated]"
+	}
+	return output.buffer.String()
 }

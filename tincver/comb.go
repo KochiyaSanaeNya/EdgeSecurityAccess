@@ -43,6 +43,8 @@ func loadESAConfig(path string) (*Config, error) {
 	}(content)
 	config := &Config{}
 	scanner := bufio.NewScanner(content)
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	seen := make(map[string]int)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -54,8 +56,15 @@ func loadESAConfig(path string) (*Config, error) {
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("invalid config line %d", lineNo)
 		}
-		key := strings.TrimSpace(strings.TrimPrefix(parts[0], "$"))
+		key := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(parts[0], "$")))
 		value := strings.TrimSpace(parts[1])
+		if value == "" {
+			return nil, fmt.Errorf("empty value for %q at line %d", key, lineNo)
+		}
+		if first, exists := seen[key]; exists {
+			return nil, fmt.Errorf("duplicate config key %q at line %d; first seen at line %d", key, lineNo, first)
+		}
+		seen[key] = lineNo
 		switch key {
 		case "servip":
 			config.ServIP = value

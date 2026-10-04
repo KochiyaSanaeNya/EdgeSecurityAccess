@@ -116,6 +116,8 @@ func readAppPathsFile(path string) (*AppPaths, bool, error) {
 
 	paths := &AppPaths{}
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	seen := make(map[string]int)
 	lineNo := 0
 	for scanner.Scan() {
 		lineNo++
@@ -129,6 +131,11 @@ func readAppPathsFile(path string) (*AppPaths, bool, error) {
 		}
 		key := strings.TrimSpace(strings.TrimPrefix(parts[0], "$"))
 		value := strings.TrimSpace(parts[1])
+		key = strings.ToLower(key)
+		if first, exists := seen[key]; exists {
+			return nil, false, fmt.Errorf("duplicate path config key %q at line %d; first seen at line %d", key, lineNo, first)
+		}
+		seen[key] = lineNo
 		switch strings.ToLower(key) {
 		case "configdir", "config_dir":
 			paths.ConfigDir = filepath.Clean(value)
@@ -281,11 +288,47 @@ func defaultTincDirFromPath() string {
 }
 
 func writeAppPathsFile(path string, paths *AppPaths) error {
+	if paths == nil {
+		return fmt.Errorf("path config is nil")
+	}
+	if strings.TrimSpace(paths.ConfigDir) == "" || !filepath.IsAbs(paths.ConfigDir) {
+		return fmt.Errorf("config directory must be an absolute path")
+	}
+	if strings.TrimSpace(paths.TincBinDir) == "" || !filepath.IsAbs(paths.TincBinDir) {
+		return fmt.Errorf("tinc package/bin directory must be an absolute path")
+	}
 	content := "$configdir = " + paths.ConfigDir + "\n" +
 		"$tincbindir = " + paths.TincBinDir + "\n" +
 		"$tincreload = " + fmt.Sprintf("%t", paths.TincReload) + "\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".esa-paths-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create path config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod path config: %w", err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("write path config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync path config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close path config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("replace path config: %w", err)
+		}
+		if retryErr := os.Rename(tmpPath, path); retryErr != nil {
+			return fmt.Errorf("replace path config: %w", retryErr)
+		}
 	}
 	return nil
 }

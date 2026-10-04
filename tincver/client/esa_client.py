@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import tempfile
 import sys
 import time
 import urllib.error
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 
 
 DEFAULT_TIMEOUT = 10
+MAX_RESPONSE_BYTES = 64 * 1024
 
 
 P = 2**255 - 19
@@ -47,11 +49,19 @@ class AuthConfig:
     @classmethod
     def from_response(cls, body: str) -> "AuthConfig":
         lines = [line.strip() for line in body.splitlines()]
-        if len(lines) != 7:
+        if len(lines) != 7 or any(not line for line in lines):
             raise ValueError(
                 "unexpected server response: expected 7 config lines, "
                 f"got {len(lines)}"
             )
+        if not lines[0].startswith("u") or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for c in lines[0]):
+            raise ValueError("server returned an invalid tinc node name")
+        try:
+            port = int(lines[6])
+        except ValueError as exc:
+            raise ValueError("server returned an invalid tinc port") from exc
+        if not 1 <= port <= 65535:
+            raise ValueError("server returned an invalid tinc port")
         return cls(
             node=lines[0],
             user_ip=lines[1],
@@ -115,7 +125,10 @@ def generate_ed25519_keypair() -> tuple[str, str]:
     digest[0] &= 248
     digest[31] &= 63
     digest[31] |= 64
-    scalar = int.from_bytes(digest[:32], "little") % GROUP_ORDER
+    # Ed25519 uses the clamped 256-bit scalar directly. Reducing it modulo
+    # the group order changes the public key and produces an unusable tinc
+    # identity.
+    scalar = int.from_bytes(digest[:32], "little")
     public_key = _encode_point(_scalar_mult_base(scalar))
     return (
         base64.b64encode(public_key).decode("ascii"),
@@ -124,8 +137,26 @@ def generate_ed25519_keypair() -> tuple[str, str]:
 
 
 def write_text_file(path: str, content: str) -> None:
-    with open(path, "w", encoding="utf-8") as file:
-        file.write(content)
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".esa-", dir=directory, text=True)
+    try:
+        os.chmod(temporary, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def build_signature_payload(username: str, timestamp: str, nonce: str, pubkey: str) -> str:
@@ -142,6 +173,19 @@ def sign_request(password: str, payload: str) -> str:
     return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def validate_public_key(value: str) -> str:
+    value = value.strip()
+    if len(value) not in {43, 44}:
+        raise ValueError("public key must be a base64 encoded 32-byte value")
+    try:
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+    except ValueError as exc:
+        raise ValueError("public key must be valid base64") from exc
+    if len(decoded) != 32:
+        raise ValueError("public key must encode 32 bytes")
+    return value
+
+
 def authenticate(
     url: str,
     username: str,
@@ -149,6 +193,14 @@ def authenticate(
     pubkey: str,
     timeout: float,
 ) -> str:
+    parsed_url = urllib.parse.urlparse(url.strip())
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ValueError("url must include an http or https scheme and host")
+    if not 0 < timeout <= 300:
+        raise ValueError("timeout must be between 0 and 300 seconds")
+    if not username or not password or not pubkey:
+        raise ValueError("username, password, and pubkey are required")
+    pubkey = validate_public_key(pubkey)
     timestamp = str(int(time.time()))
     nonce = secrets.token_urlsafe(24)
     payload = build_signature_payload(username, timestamp, nonce, pubkey)
@@ -176,7 +228,10 @@ def authenticate(
     )
 
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read().decode("utf-8")
+        body = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise ValueError("server response is too large")
+    return body.decode("utf-8")
 
 
 def read_public_key(value: str | None, path: str | None) -> tuple[str, str | None]:
@@ -184,9 +239,9 @@ def read_public_key(value: str | None, path: str | None) -> tuple[str, str | Non
         raise ValueError("use either --pubkey or --pubkey-file, not both")
     if path:
         with open(path, "r", encoding="utf-8") as file:
-            return file.read().strip(), None
+            return validate_public_key(file.read()), None
     if value:
-        return value.strip(), None
+        return validate_public_key(value), None
     public_key, private_seed = generate_ed25519_keypair()
     return public_key, private_seed
 
@@ -273,7 +328,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     except urllib.error.HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace").strip()
+        message = exc.read(MAX_RESPONSE_BYTES).decode("utf-8", errors="replace").strip()
         print(f"HTTP {exc.code}: {message}", file=sys.stderr)
         return 1
     except urllib.error.URLError as exc:

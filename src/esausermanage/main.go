@@ -8,11 +8,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"golang.org/x/crypto/argon2"
+)
+
+const (
+	minPasswordLength = 6
+	maxPasswordLength = 256
+	argonMemory       = 64 * 1024
+	argonIterations   = 3
+	argonParallelism  = 4
+	argonSaltLength   = 16
+	argonHashLength   = 32
 )
 
 type Account struct {
@@ -21,41 +33,64 @@ type Account struct {
 }
 
 func hashPassword(password string) (string, error) {
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
+	if err := validatePassword(password); err != nil {
 		return "", err
 	}
-	hash := argon2.IDKey([]byte(password), salt, 3, 65536, 4, 32)
-	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
-	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
-	return fmt.Sprintf("$argon2id$v=19$m=65536,t=3,p=4$%s$%s", b64Salt, b64Hash), nil
+	salt := make([]byte, argonSaltLength)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
+	digest := argon2.IDKey([]byte(password), salt, argonIterations, argonMemory, argonParallelism, argonHashLength)
+	return "$argon2id$v=19$m=" + strconv.Itoa(argonMemory) + ",t=" + strconv.Itoa(argonIterations) + ",p=" + strconv.Itoa(argonParallelism) + "$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(digest), nil
 }
 
 func verifyPassword(password, encodedHash string) (bool, error) {
-	parts := strings.Split(encodedHash, "$")
-	if len(parts) != 6 {
-		return false, errors.New("invalid hash format")
-	}
-	var memory uint32
-	var iterations uint32
-	var parallelism uint8
-	_, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &iterations, &parallelism)
+	params, salt, expected, err := parsePasswordHash(encodedHash)
 	if err != nil {
 		return false, err
+	}
+	actual := argon2.IDKey([]byte(password), salt, params.iterations, params.memory, params.parallelism, uint32(len(expected)))
+	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
+}
+
+type passwordHashParams struct {
+	memory      uint32
+	iterations  uint32
+	parallelism uint8
+}
+
+func parsePasswordHash(encodedHash string) (passwordHashParams, []byte, []byte, error) {
+	parts := strings.Split(strings.TrimSpace(encodedHash), "$")
+	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" || parts[2] != "v=19" {
+		return passwordHashParams{}, nil, nil, errors.New("invalid argon2id hash format")
+	}
+	params := map[string]uint64{}
+	for _, item := range strings.Split(parts[3], ",") {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || (key != "m" && key != "t" && key != "p") {
+			return passwordHashParams{}, nil, nil, errors.New("invalid argon2id parameters")
+		}
+		if _, exists := params[key]; exists {
+			return passwordHashParams{}, nil, nil, errors.New("duplicate argon2id parameter")
+		}
+		parsed, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			return passwordHashParams{}, nil, nil, errors.New("invalid argon2id parameters")
+		}
+		params[key] = parsed
+	}
+	if len(params) != 3 || params["m"] < 32*1024 || params["m"] > 256*1024 || params["t"] < 1 || params["t"] > 10 || params["p"] < 1 || params["p"] > 8 {
+		return passwordHashParams{}, nil, nil, errors.New("argon2id parameters out of range")
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
-		return false, err
+	if err != nil || len(salt) < 16 || len(salt) > 64 {
+		return passwordHashParams{}, nil, nil, errors.New("invalid argon2id salt")
 	}
-	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil {
-		return false, err
+	expected, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil || len(expected) < 16 || len(expected) > 64 {
+		return passwordHashParams{}, nil, nil, errors.New("invalid argon2id digest")
 	}
-	otherHash := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(hash)))
-	if subtle.ConstantTimeCompare(hash, otherHash) == 1 {
-		return true, nil
-	}
-	return false, nil
+	return passwordHashParams{memory: uint32(params["m"]), iterations: uint32(params["t"]), parallelism: uint8(params["p"])}, salt, expected, nil
 }
 
 func loadAccounts(path string) ([]Account, error) {
@@ -65,226 +100,257 @@ func loadAccounts(path string) ([]Account, error) {
 	}
 	defer file.Close()
 
-	var accounts []Account
+	accounts := make([]Account, 0, 16)
+	seen := make(map[string]struct{})
 	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	for lineNo := 1; scanner.Scan(); lineNo++ {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
 		parts := strings.SplitN(line, ":", 2)
-		if len(parts) < 2 {
-			continue
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid account line %d", lineNo)
 		}
-		accounts = append(accounts, Account{
-			Username: strings.TrimSpace(parts[0]),
-			Password: strings.TrimSpace(parts[1]),
-		})
+		username, encodedHash := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		if err := validateUsername(username); err != nil {
+			return nil, fmt.Errorf("invalid username at line %d: %w", lineNo, err)
+		}
+		if _, exists := seen[username]; exists {
+			return nil, fmt.Errorf("duplicate username %q at line %d", username, lineNo)
+		}
+		if err := ValidatePasswordHash(encodedHash); err != nil {
+			return nil, fmt.Errorf("invalid password hash at line %d: %w", lineNo, err)
+		}
+		seen[username] = struct{}{}
+		accounts = append(accounts, Account{Username: username, Password: encodedHash})
 	}
-	return accounts, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read accounts: %w", err)
+	}
+	return accounts, nil
 }
 
 func saveAccounts(path string, accounts []Account) error {
-	file, err := os.Create(path)
+	if strings.TrimSpace(path) == "" {
+		return errors.New("account path is required")
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create account directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(directory, ".esa-users-*.tmp")
 	if err != nil {
+		return fmt.Errorf("create account file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-	for _, acc := range accounts {
-		line := fmt.Sprintf("%s:%s\n", acc.Username, acc.Password)
-		if _, err := writer.WriteString(line); err != nil {
+	writer := bufio.NewWriter(tmp)
+	seen := make(map[string]struct{}, len(accounts))
+	for _, account := range accounts {
+		if err := validateUsername(account.Username); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		if _, exists := seen[account.Username]; exists {
+			_ = tmp.Close()
+			return fmt.Errorf("duplicate username %q", account.Username)
+		}
+		if err := ValidatePasswordHash(account.Password); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+		seen[account.Username] = struct{}{}
+		if _, err := fmt.Fprintf(writer, "%s:%s\n", account.Username, account.Password); err != nil {
+			_ = tmp.Close()
 			return err
 		}
 	}
-	return writer.Flush()
+	if err := writer.Flush(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("replace account file: %w", err)
+		}
+		if retryErr := os.Rename(tmpPath, path); retryErr != nil {
+			return fmt.Errorf("replace account file: %w", retryErr)
+		}
+	}
+	return nil
+}
+
+func ValidatePasswordHash(value string) error {
+	_, _, _, err := parsePasswordHash(value)
+	return err
+}
+
+func validateUsername(value string) error {
+	if value == "" || len(value) > 32 {
+		return errors.New("username must contain 1 to 32 characters")
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("_.-", r) {
+			continue
+		}
+		return errors.New("username contains invalid characters")
+	}
+	return nil
+}
+
+func validatePassword(value string) error {
+	if len(value) < minPasswordLength || len(value) > maxPasswordLength {
+		return fmt.Errorf("password must contain %d to %d bytes", minPasswordLength, maxPasswordLength)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f || unicode.IsControl(r) {
+			return errors.New("password contains control characters")
+		}
+	}
+	return nil
 }
 
 func printAccounts(accounts []Account) {
 	fmt.Println("\n==================== User List ====================")
-	fmt.Printf("%-5s %-20s %-25s\n", "Index", "Username", "Password Hash (Argon2)")
-	for i, acc := range accounts {
-		passShort := acc.Password
-		if len(passShort) > 25 {
-			passShort = passShort[:22] + "..."
-		}
-		fmt.Printf("%-5d %-20s %-25s\n", i+1, acc.Username, passShort)
+	for index, account := range accounts {
+		fmt.Printf("%d. %s\n", index+1, account.Username)
 	}
 	fmt.Println("===================================================")
 }
 
 func readInput(reader *bufio.Reader, prompt string) string {
 	fmt.Print(prompt)
-	input, _ := reader.ReadString('\n')
-	return strings.TrimSpace(input)
+	value, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func main() {
 	reader := bufio.NewReader(os.Stdin)
-	var path string
-	var accounts []Account
-	var err error
-
-	for {
-		path = readInput(reader, "Enter the absolute path of the configuration file: ")
-		if path == "" {
-			fmt.Println("Path cannot be empty.")
-			continue
+	path := readInput(reader, "Enter the account file path: ")
+	if path == "" {
+		fmt.Fprintln(os.Stderr, "account file path is required")
+		return
+	}
+	accounts, err := loadAccounts(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			accounts = []Account{}
+		} else {
+			fmt.Fprintln(os.Stderr, "load accounts:", err)
+			return
 		}
-		accounts, err = loadAccounts(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				fmt.Println("File does not exist. A new file will be created upon saving.")
-				accounts = []Account{}
-				break
-			}
-			fmt.Printf("Error loading file: %v\n", err)
-			continue
-		}
-		break
 	}
 
+	save := func() {
+		if err := saveAccounts(path, accounts); err != nil {
+			fmt.Println("Save failed:", err)
+		} else {
+			fmt.Println("Saved")
+		}
+	}
 	for {
 		printAccounts(accounts)
-		fmt.Println("\nMenu:")
-		fmt.Println("1. Create User")
-		fmt.Println("2. Find/Verify User")
-		fmt.Println("3. Update User Password")
-		fmt.Println("4. Delete User")
+		fmt.Println("1. Create user")
+		fmt.Println("2. Verify user")
+		fmt.Println("3. Update password")
+		fmt.Println("4. Delete user")
 		fmt.Println("5. Exit")
-		choice := readInput(reader, "Enter choice (1-5): ")
-
-		switch choice {
+		switch readInput(reader, "Choice: ") {
 		case "1":
-			username := readInput(reader, "Enter Username: ")
-			if username == "" {
-				fmt.Println("Error: Username cannot be empty.")
+			username := readInput(reader, "Username: ")
+			if err := validateUsername(username); err != nil {
+				fmt.Println("Error:", err)
 				continue
 			}
-			exists := false
-			for _, acc := range accounts {
-				if acc.Username == username {
-					exists = true
-					break
-				}
-			}
-			if exists {
-				fmt.Println("Error: Username already exists.")
-				continue
-			}
-			password := readInput(reader, "Enter Password: ")
-			if password == "" {
-				fmt.Println("Error: Password cannot be empty.")
-				continue
-			}
-
-			encrypted, err := hashPassword(password)
-			if err != nil {
-				fmt.Printf("Encryption error: %v\n", err)
-				continue
-			}
-
-			accounts = append(accounts, Account{
-				Username: username,
-				Password: encrypted,
-			})
-			if err := saveAccounts(path, accounts); err != nil {
-				fmt.Printf("Error saving: %v\n", err)
-			} else {
-				fmt.Println("User created and saved successfully.")
-			}
-
-		case "2":
-			search := readInput(reader, "Enter Username to find: ")
 			found := false
-			for _, acc := range accounts {
-				if acc.Username == search {
-					fmt.Printf("\nFound User:\nUsername: %s\nPassword Hash: %s\n", acc.Username, acc.Password)
-
-					verifyOpt := readInput(reader, "Do you want to verify a plain password against this hash? (y/n): ")
-					if strings.ToLower(verifyOpt) == "y" {
-						plainPass := readInput(reader, "Enter plain password: ")
-						match, err := verifyPassword(plainPass, acc.Password)
-						if err != nil {
-							fmt.Printf("Verification error: %v\n", err)
-						} else if match {
-							fmt.Println("Success: Password matches!")
-						} else {
-							fmt.Println("Failed: Password mismatch.")
-						}
-					}
+			for _, account := range accounts {
+				found = found || account.Username == username
+			}
+			if found {
+				fmt.Println("Error: username already exists")
+				continue
+			}
+			password := readInput(reader, "Password: ")
+			hash, err := hashPassword(password)
+			if err != nil {
+				fmt.Println("Error:", err)
+				continue
+			}
+			accounts = append(accounts, Account{Username: username, Password: hash})
+			save()
+		case "2":
+			username := readInput(reader, "Username: ")
+			found := false
+			for _, account := range accounts {
+				if account.Username == username {
 					found = true
+					password := readInput(reader, "Password: ")
+					match, err := verifyPassword(password, account.Password)
+					if err != nil || !match {
+						fmt.Println("Password verification failed")
+					} else {
+						fmt.Println("Password verified")
+					}
 					break
 				}
 			}
 			if !found {
-				fmt.Println("User not found.")
+				fmt.Println("User not found")
 			}
-
 		case "3":
-			search := readInput(reader, "Enter Username to update: ")
-			index := -1
-			for i, acc := range accounts {
-				if acc.Username == search {
-					index = i
+			username := readInput(reader, "Username: ")
+			found := false
+			for index := range accounts {
+				if accounts[index].Username == username {
+					found = true
+					password := readInput(reader, "New password: ")
+					hash, err := hashPassword(password)
+					if err != nil {
+						fmt.Println("Error:", err)
+					} else {
+						accounts[index].Password = hash
+						save()
+					}
 					break
 				}
 			}
-			if index == -1 {
-				fmt.Println("Username not found.")
-				continue
+			if !found {
+				fmt.Println("User not found")
 			}
-
-			newPassword := readInput(reader, "Enter New Password: ")
-			if newPassword == "" {
-				fmt.Println("Password cannot be empty. Update aborted.")
-				continue
-			}
-
-			encrypted, err := hashPassword(newPassword)
-			if err != nil {
-				fmt.Printf("Encryption error: %v\n", err)
-				continue
-			}
-
-			accounts[index].Password = encrypted
-			if err := saveAccounts(path, accounts); err != nil {
-				fmt.Printf("Error saving: %v\n", err)
-			} else {
-				fmt.Println("User password updated successfully.")
-			}
-
 		case "4":
-			search := readInput(reader, "Enter Username to delete: ")
-			index := -1
-			for i, acc := range accounts {
-				if acc.Username == search {
-					index = i
+			username := readInput(reader, "Username: ")
+			found := false
+			for index := range accounts {
+				if accounts[index].Username == username {
+					found = true
+					accounts = append(accounts[:index], accounts[index+1:]...)
+					save()
 					break
 				}
 			}
-			if index == -1 {
-				fmt.Println("Username not found.")
-				continue
+			if !found {
+				fmt.Println("User not found")
 			}
-
-			accounts = append(accounts[:index], accounts[index+1:]...)
-			if err := saveAccounts(path, accounts); err != nil {
-				fmt.Printf("Error saving: %v\n", err)
-			} else {
-				fmt.Println("User deleted successfully.")
-			}
-
 		case "5":
-			fmt.Println("Exiting program.")
 			return
 		default:
-			fmt.Println("Invalid option.")
+			fmt.Println("Invalid choice")
 		}
 	}
-}
-
-func init() {
-	log.SetOutput(io.Discard)
 }

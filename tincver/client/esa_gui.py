@@ -249,6 +249,9 @@ class ESAClientGUI(tk.Tk):
             messagebox.showwarning("Invalid timeout", "Timeout must be a number.")
             return
 
+        if "://" not in url:
+            url = "https://" + url
+
         self.auth_button.configure(state=tk.DISABLED)
         self.status_var.set("Authenticating...")
         self.output.delete("1.0", tk.END)

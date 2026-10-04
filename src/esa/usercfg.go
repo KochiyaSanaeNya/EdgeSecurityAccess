@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -20,48 +21,54 @@ type UserStore struct {
 var userStore *UserStore
 
 func LoadUserStore(path string) (*UserStore, error) {
-	content, err := os.Open(path)
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open user config: %w", err)
 	}
-	defer func() {
-		_ = content.Close()
-	}()
+	defer file.Close()
 
 	store := &UserStore{byName: make(map[string]*UserCfg)}
-	scanner := bufio.NewScanner(content)
-
-	for scanner.Scan() {
+	seenIDs := make(map[int]int)
+	seenIPs := make(map[string]string)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	for lineNo := 1; scanner.Scan(); lineNo++ {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
-
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) != 3 {
-			continue
+			return nil, fmt.Errorf("invalid user config line %d", lineNo)
 		}
-
-		idStr := strings.TrimSpace(parts[0])
+		id, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil || id < 0 {
+			return nil, fmt.Errorf("invalid user id at line %d", lineNo)
+		}
 		username := strings.TrimSpace(parts[1])
-		ip := strings.TrimSpace(parts[2])
-
-		id, err := strconv.Atoi(idStr)
+		if err := ValidateUsername(username); err != nil {
+			return nil, fmt.Errorf("invalid username at line %d: %w", lineNo, err)
+		}
+		ip, err := NormalizePeerIP(strings.TrimSpace(parts[2]))
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("invalid peer IP at line %d: %w", lineNo, err)
 		}
-
-		store.byName[username] = &UserCfg{
-			id:       id,
-			username: username,
-			ip:       ip,
+		if first, exists := seenIDs[id]; exists {
+			return nil, fmt.Errorf("duplicate user id %d at line %d; first seen at line %d", id, lineNo, first)
 		}
+		if first, exists := seenIPs[ip]; exists {
+			return nil, fmt.Errorf("duplicate peer IP %q for %q and %q", ip, first, username)
+		}
+		if _, exists := store.byName[username]; exists {
+			return nil, fmt.Errorf("duplicate username %q at line %d", username, lineNo)
+		}
+		seenIDs[id] = lineNo
+		seenIPs[ip] = username
+		store.byName[username] = &UserCfg{id: id, username: username, ip: ip}
 	}
-
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan user config: %w", err)
 	}
-
 	return store, nil
 }
 
@@ -71,57 +78,3 @@ func (s *UserStore) Get(name string) *UserCfg {
 	}
 	return s.byName[name]
 }
-
-/*func usrcfg(tarname string) *UserCfg {
-	if userStore != nil {
-		return userStore.Get(tarname)
-	}
-	content, err := os.Open("config/usrwg.conf")
-	if err != nil {
-		fmt.Println("INVALID FILE\n", err)
-		return nil
-	}
-	defer content.Close()
-
-	scanner := bufio.NewScanner(content)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.SplitN(line, ":", 3)
-
-		if len(parts) != 3 {
-			continue
-		}
-
-		idStr := strings.TrimSpace(parts[0])
-		username := strings.TrimSpace(parts[1])
-		ip := strings.TrimSpace(parts[2])
-
-		if username != tarname {
-			continue
-		}
-
-		id, err := strconv.Atoi(idStr)
-		if err != nil {
-			continue
-		}
-
-		return &UserCfg{
-			id:       id,
-			username: username,
-			ip:       ip,
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Println("SCAN ERROR\n", err)
-	}
-
-	return nil
-}
-*/

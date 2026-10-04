@@ -1,397 +1,221 @@
+#!/usr/bin/env python3
+"""Small, thread-safe WireGuard client for the ESA HTTP endpoint."""
+
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
+import os
+import queue
 import secrets
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
-from tkinter import messagebox
-from tkinter import filedialog
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from urllib.parse import urlparse
 
 import requests
-
 from cryptography.hazmat.primitives.asymmetric import x25519
 
 
-REQUEST_TIMEOUT = 8
-VERIFY_TLS = True
-USER_AGENT = "ESAClient-GUI/2.1"
+DEFAULT_TIMEOUT = 8.0
+MAX_RESPONSE_BYTES = 64 * 1024
+USER_AGENT = "EdgeSecurityAccess-WireGuard/3.0"
 
 
-class ESAClientGUI:
+def generate_wg_keypair() -> tuple[str, str]:
+    private_key = x25519.X25519PrivateKey.generate()
+    private_raw = private_key.private_bytes_raw()
+    public_raw = private_key.public_key().public_bytes_raw()
+    return base64.b64encode(private_raw).decode("ascii"), base64.b64encode(public_raw).decode("ascii")
 
-    def __init__(self, root):
 
-        self.root = root
-        self.root.title("ESA GUI Client")
-        self.root.geometry("700x600")
-        self.root.resizable(False, False)
+def build_signature_payload(username: str, timestamp: str, nonce: str, pubkey: str) -> str:
+    return f"username={username}&timestamp={timestamp}&nonce={nonce}&pubkey={pubkey}"
 
-        self.build_ui()
 
-    def build_ui(self):
+def sign_request(password: str, payload: str) -> str:
+    key = hashlib.sha256(password.encode("utf-8")).digest()
+    return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
-        frame = ttk.Frame(self.root, padding=15)
-        frame.pack(fill="both", expand=True)
 
-        title = ttk.Label(
-            frame,
-            text="ESA WireGuard Client",
-            font=("Segoe UI", 18, "bold")
-        )
-        title.pack(pady=(0, 20))
+def normalize_url(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("server URL is required")
+    if "://" not in value:
+        value = "https://" + value
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("server URL must include an HTTP(S) host")
+    return value
 
-        # =========================
-        # URL
-        # =========================
 
-        ttk.Label(frame, text="Server URL:").pack(anchor="w")
+def build_wg_config(response_text: str, private_key: str) -> str:
+    lines = [line.strip() for line in response_text.splitlines()]
+    if len(lines) != 5 or any(not line for line in lines):
+        raise ValueError("server returned an invalid WireGuard configuration")
+    if not private_key:
+        raise ValueError("private key is required")
+    return "\n".join(
+        [
+            "[Interface]",
+            f"PrivateKey = {private_key}",
+            f"Address = {lines[0]}",
+            "",
+            "[Peer]",
+            f"PublicKey = {lines[1]}",
+            f"AllowedIPs = {lines[2]}",
+            f"Endpoint = {lines[3]}",
+            f"PersistentKeepalive = {lines[4]}",
+            "",
+        ]
+    )
 
-        self.url_var = tk.StringVar()
 
-        self.url_entry = ttk.Entry(
-            frame,
-            textvariable=self.url_var,
-            width=80
-        )
-        self.url_entry.pack(fill="x", pady=(0, 15))
+def authenticate(url: str, username: str, password: str, timeout: float, verify_tls: bool) -> str:
+    if not username.strip() or not password:
+        raise ValueError("username and password are required")
+    if not 0 < timeout <= 300:
+        raise ValueError("timeout must be between 0 and 300 seconds")
+    url = normalize_url(url)
+    private_key, public_key = generate_wg_keypair()
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_urlsafe(24)
+    payload = build_signature_payload(username.strip(), timestamp, nonce, public_key)
+    form = {
+        "username": username.strip(),
+        "password": password,
+        "pubkey": public_key,
+        "timestamp": timestamp,
+        "nonce": nonce,
+        "signature": sign_request(password, payload),
+    }
+    response = requests.post(
+        url,
+        data=form,
+        headers={"User-Agent": USER_AGENT},
+        timeout=timeout,
+        verify=verify_tls,
+    )
+    response.raise_for_status()
+    if len(response.content) > MAX_RESPONSE_BYTES:
+        raise ValueError("server response is too large")
+    return build_wg_config(response.text, private_key)
 
-        # =========================
-        # USERNAME
-        # =========================
 
-        ttk.Label(frame, text="Username:").pack(anchor="w")
-
-        self.username_var = tk.StringVar()
-
-        self.username_entry = ttk.Entry(
-            frame,
-            textvariable=self.username_var,
-            width=80
-        )
-        self.username_entry.pack(fill="x", pady=(0, 15))
-
-        # =========================
-        # PASSWORD
-        # =========================
-
-        ttk.Label(frame, text="Password:").pack(anchor="w")
-
-        self.password_var = tk.StringVar()
-
-        self.password_entry = ttk.Entry(
-            frame,
-            textvariable=self.password_var,
-            show="*",
-            width=80
-        )
-        self.password_entry.pack(fill="x", pady=(0, 15))
-
-        # =========================
-        # TLS
-        # =========================
-
-        self.tls_var = tk.BooleanVar(value=True)
-
-        self.tls_check = ttk.Checkbutton(
-            frame,
-            text="Verify TLS Certificate",
-            variable=self.tls_var
-        )
-        self.tls_check.pack(anchor="w", pady=(0, 20))
-
-        # =========================
-        # BUTTONS
-        # =========================
-
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(fill="x", pady=(0, 20))
-
-        self.connect_button = ttk.Button(
-            button_frame,
-            text="Connect",
-            command=self.start_connect
-        )
-        self.connect_button.pack(side="left", padx=(0, 10))
-
-        self.save_button = ttk.Button(
-            button_frame,
-            text="Save Config",
-            command=self.save_config,
-            state="disabled"
-        )
-        self.save_button.pack(side="left")
-
-        # =========================
-        # LOG OUTPUT
-        # =========================
-
-        ttk.Label(frame, text="Log Output:").pack(anchor="w")
-
-        self.log_text = tk.Text(
-            frame,
-            height=18,
-            bg="#111111",
-            fg="#00ff66",
-            insertbackground="#00ff66"
-        )
-        self.log_text.pack(fill="both", expand=True)
-
-        self.generated_config = None
-
-    # =========================
-    # LOGGING
-    # =========================
-
-    def log(self, text):
-        self.log_text.insert("end", text + "\n")
-        self.log_text.see("end")
-
-    # =========================
-    # WG KEYPAIR
-    # =========================
-
-    def generate_wg_keypair(self):
-
-        priv = x25519.X25519PrivateKey.generate()
-
-        priv_raw = priv.private_bytes_raw()
-        pub_raw = priv.public_key().public_bytes_raw()
-
-        wg_priv = base64.b64encode(priv_raw).decode()
-        wg_pub = base64.b64encode(pub_raw).decode()
-
-        return wg_priv, wg_pub
-
-    # =========================
-    # AUTH
-    # =========================
-
-    def derive_auth_key(self, password):
-        return hashlib.sha256(password.encode()).digest()
-
-    def build_signature_payload(
-            self,
-            username,
-            timestamp,
-            nonce,
-            pubkey
-    ):
-
-        return (
-            f"username={username}"
-            f"&timestamp={timestamp}"
-            f"&nonce={nonce}"
-            f"&pubkey={pubkey}"
-        )
-
-    def build_signature(self, auth_key, payload):
-
-        sig = hmac.new(
-            auth_key,
-            payload.encode(),
-            hashlib.sha256
-        ).digest()
-
-        return sig.hex()
-
-    # =========================
-    # CONFIG
-    # =========================
-
-    def generate_wg_config(self, response_text, private_key):
-
-        lines = response_text.strip().splitlines()
-
-        if len(lines) < 5:
-            raise RuntimeError(
-                f"Invalid server response:\n{response_text}"
-            )
-
-        return f"""[Interface]
-PrivateKey = {private_key}
-Address = {lines[0]}
-
-[Peer]
-PublicKey = {lines[1]}
-AllowedIPs = {lines[2]}
-Endpoint = {lines[3]}
-PersistentKeepalive = {lines[4]}
-"""
-
-    # =========================
-    # CONNECT
-    # =========================
-
-    def start_connect(self):
-
-        self.connect_button.config(state="disabled")
-
-        threading.Thread(
-            target=self.connect,
-            daemon=True
-        ).start()
-
-    def connect(self):
-
+def atomic_write(path: str, content: str) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        temporary.write_text(content, encoding="utf-8", newline="\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+    except BaseException:
         try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
 
-            url = self.url_var.get().strip()
-            username = self.username_var.get().strip()
-            password = self.password_var.get().strip()
 
-            if not url:
-                raise RuntimeError("Server URL required")
+class ESAClientGUI(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("ESA WireGuard Client")
+        self.geometry("720x620")
+        self.minsize(620, 520)
+        self.url_var = tk.StringVar(value="http://127.0.0.1:30001/")
+        self.username_var = tk.StringVar()
+        self.password_var = tk.StringVar()
+        self.timeout_var = tk.StringVar(value=str(DEFAULT_TIMEOUT))
+        self.verify_tls_var = tk.BooleanVar(value=True)
+        self.status_var = tk.StringVar(value="Ready")
+        self.events: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.generated_config = ""
+        self._build_ui()
+        self.after(100, self._drain_events)
 
-            if not username:
-                raise RuntimeError("Username required")
+    def _build_ui(self) -> None:
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        frame.columnconfigure(1, weight=1)
+        fields = [("Server URL", self.url_var, False), ("Username", self.username_var, False), ("Password", self.password_var, True), ("Timeout", self.timeout_var, False)]
+        for row, (label, variable, secret) in enumerate(fields):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=5, padx=(0, 10))
+            ttk.Entry(frame, textvariable=variable, show="*" if secret else "").grid(row=row, column=1, sticky="ew", pady=5)
+        ttk.Checkbutton(frame, text="Verify TLS certificate", variable=self.verify_tls_var).grid(row=4, column=1, sticky="w", pady=5)
+        actions = ttk.Frame(frame)
+        actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 10))
+        self.connect_button = ttk.Button(actions, text="Connect", command=self._start_connect)
+        self.connect_button.pack(side=tk.LEFT)
+        self.save_button = ttk.Button(actions, text="Save config", command=self._save_config, state=tk.DISABLED)
+        self.save_button.pack(side=tk.LEFT, padx=8)
+        ttk.Label(actions, textvariable=self.status_var).pack(side=tk.RIGHT)
+        self.log_text = tk.Text(frame, height=20, wrap=tk.WORD, state=tk.DISABLED)
+        self.log_text.grid(row=6, column=0, columnspan=2, sticky="nsew")
+        frame.rowconfigure(6, weight=1)
 
-            if not password:
-                raise RuntimeError("Password required")
+    def _append_log(self, message: str) -> None:
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
 
-            if not url.startswith(("http://", "https://")):
-                url = "https://" + url
+    def _start_connect(self) -> None:
+        try:
+            timeout = float(self.timeout_var.get().strip())
+        except ValueError:
+            messagebox.showwarning("Invalid timeout", "Timeout must be a number.")
+            return
+        values = (self.url_var.get(), self.username_var.get(), self.password_var.get(), timeout, self.verify_tls_var.get())
+        self.connect_button.configure(state=tk.DISABLED)
+        self.save_button.configure(state=tk.DISABLED)
+        self.status_var.set("Connecting...")
+        self._append_log("Generating WireGuard keypair and authenticating...")
+        threading.Thread(target=self._connect_worker, args=values, daemon=True).start()
 
-            self.log("[+] Generating WireGuard keypair...")
+    def _connect_worker(self, url: str, username: str, password: str, timeout: float, verify_tls: bool) -> None:
+        try:
+            self.events.put(("ok", authenticate(url, username, password, timeout, verify_tls)))
+        except requests.RequestException as exc:
+            self.events.put(("error", f"request failed: {exc}"))
+        except (OSError, ValueError) as exc:
+            self.events.put(("error", str(exc)))
 
-            wg_priv, wg_pub = self.generate_wg_keypair()
+    def _drain_events(self) -> None:
+        try:
+            status, message = self.events.get_nowait()
+        except queue.Empty:
+            self.after(100, self._drain_events)
+            return
+        self.connect_button.configure(state=tk.NORMAL)
+        if status == "ok":
+            self.generated_config = message
+            self.save_button.configure(state=tk.NORMAL)
+            self.status_var.set("Connected")
+            self._append_log("Authentication succeeded; config is ready to save.")
+        else:
+            self.status_var.set("Failed")
+            self._append_log("Error: " + message)
+            messagebox.showerror("Connection failed", message)
+        self.after(100, self._drain_events)
 
-            timestamp = str(int(time.time()))
-            nonce = secrets.token_hex(16)
-
-            auth_key = self.derive_auth_key(password)
-
-            payload = self.build_signature_payload(
-                username,
-                timestamp,
-                nonce,
-                wg_pub
-            )
-
-            signature = self.build_signature(
-                auth_key,
-                payload
-            )
-
-            form_data = {
-                "username": username,
-                "password": password,
-                "pubkey": wg_pub,
-                "timestamp": timestamp,
-                "nonce": nonce,
-                "signature": signature
-            }
-
-            headers = {
-                "User-Agent": USER_AGENT
-            }
-
-            self.log("[+] Connecting to server...")
-
-            response = requests.post(
-                url,
-                data=form_data,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-                verify=self.tls_var.get()
-            )
-
-            self.log(f"[+] StatusCode: {response.status_code}")
-
-            if response.status_code != 200:
-                raise RuntimeError(response.text)
-
-            self.generated_config = self.generate_wg_config(
-                response.text,
-                wg_priv
-            )
-
-            self.log("[+] WireGuard config generated")
-            self.log("[+] Ready to save")
-
-            self.save_button.config(state="normal")
-
-            messagebox.showinfo(
-                "Success",
-                "Authentication successful"
-            )
-
-        except requests.exceptions.Timeout:
-            messagebox.showerror(
-                "Error",
-                "Request timeout"
-            )
-
-        except requests.exceptions.ConnectionError:
-            messagebox.showerror(
-                "Error",
-                "Connection failed"
-            )
-
-        except requests.exceptions.SSLError:
-            messagebox.showerror(
-                "Error",
-                "TLS verification failed"
-            )
-
-        except Exception as e:
-            messagebox.showerror(
-                "Error",
-                str(e)
-            )
-            self.log(f"[!] Error: {e}")
-
-        finally:
-            self.connect_button.config(state="normal")
-
-    # =========================
-    # SAVE CONFIG
-    # =========================
-
-    def save_config(self):
-
+    def _save_config(self) -> None:
         if not self.generated_config:
             return
-
-        path = filedialog.asksaveasfilename(
-            title="Save WireGuard Config",
-            defaultextension=".conf",
-            filetypes=[
-                ("WireGuard Config", "*.conf"),
-                ("All Files", "*.*")
-            ],
-            initialfile="esaclient.conf"
-        )
-
+        path = filedialog.asksaveasfilename(defaultextension=".conf", initialfile="esaclient.conf", filetypes=[("WireGuard config", "*.conf"), ("All files", "*.*")])
         if not path:
             return
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.generated_config)
-
-        self.log(f"[+] Config saved: {path}")
-
-        messagebox.showinfo(
-            "Saved",
-            "WireGuard config saved successfully"
-        )
-
-
-def main():
-
-    root = tk.Tk()
-
-    try:
-        style = ttk.Style()
-        style.theme_use("clam")
-    except:
-        pass
-
-    ESAClientGUI(root)
-
-    root.mainloop()
+        try:
+            atomic_write(path, self.generated_config)
+            self._append_log(f"Saved config: {path}")
+        except OSError as exc:
+            messagebox.showerror("Save failed", str(exc))
 
 
 if __name__ == "__main__":
-    main()
+    ESAClientGUI().mainloop()

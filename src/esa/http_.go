@@ -6,12 +6,14 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,13 +35,16 @@ type ipLimiter struct {
 }
 
 type Auth struct {
-	db       map[string]string
-	Jobs     chan *AuthJob
-	limiters sync.Map
-	nonceMu  sync.Mutex
-	nonces   map[string]time.Time
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	db           map[string]string
+	Jobs         chan *AuthJob
+	limiters     sync.Map
+	limiterMu    sync.Mutex
+	nonceMu      sync.Mutex
+	nonces       map[string]time.Time
+	stopCh       chan struct{}
+	stopOnce     sync.Once
+	cleanupWG    sync.WaitGroup
+	limiterCount int64
 }
 
 const (
@@ -54,6 +59,7 @@ const (
 	nonceTTL           = 1 * time.Minute
 	nonceSweepEvery    = 1 * time.Minute
 	allowedTimeSkew    = 30 * time.Second
+	maxLimiterEntries  = 100000
 )
 
 var (
@@ -175,8 +181,11 @@ func New(path string) (*Auth, error) {
 	}(f)
 
 	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 1024), maxBodyBytes)
+	lineNo := 0
 
 	for s.Scan() {
+		lineNo++
 
 		l := strings.TrimSpace(s.Text())
 
@@ -198,25 +207,21 @@ func New(path string) (*Auth, error) {
 			p = strings.SplitN(l, ",", 2)
 		}
 
-		if len(p) == 2 {
-
-			user := strings.TrimSpace(p[0])
-
-			if _, exists := db[user]; exists {
-
-				logJSON(
-					"warn",
-					"users_db_duplicate",
-					logFields{
-						"user": user,
-					},
-				)
-
-				continue
-			}
-
-			db[user] = strings.TrimSpace(p[1])
+		if len(p) != 2 {
+			return nil, fmt.Errorf("invalid users db line %d", lineNo)
 		}
+		user := strings.TrimSpace(p[0])
+		if err := ValidateUsername(user); err != nil {
+			return nil, fmt.Errorf("invalid username at line %d: %w", lineNo, err)
+		}
+		pwHash := strings.TrimSpace(p[1])
+		if err := ValidatePasswordHashFormat(pwHash); err != nil {
+			return nil, fmt.Errorf("invalid password hash at line %d: %w", lineNo, err)
+		}
+		if _, exists := db[user]; exists {
+			return nil, fmt.Errorf("duplicate username %q at line %d", user, lineNo)
+		}
+		db[user] = pwHash
 	}
 
 	if err := s.Err(); err != nil {
@@ -278,19 +283,11 @@ func clientIP(r *http.Request) string {
 }
 
 func (a *Auth) allowRequest(ip string) bool {
-
+	lim, ok := a.getLimiter(ip)
+	if !ok {
+		return false
+	}
 	now := time.Now()
-
-	limIface, _ := a.limiters.LoadOrStore(
-		ip,
-		&ipLimiter{
-			tokens:   burstTokens,
-			last:     now,
-			lastSeen: now,
-		},
-	)
-
-	lim := limIface.(*ipLimiter)
 
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
@@ -316,17 +313,10 @@ func (a *Auth) allowRequest(ip string) bool {
 }
 
 func (a *Auth) recordFailure(ip string) time.Duration {
-
-	limIface, _ := a.limiters.LoadOrStore(
-		ip,
-		&ipLimiter{
-			tokens:   burstTokens,
-			last:     time.Now(),
-			lastSeen: time.Now(),
-		},
-	)
-
-	lim := limIface.(*ipLimiter)
+	lim, ok := a.getLimiter(ip)
+	if !ok {
+		return maxFailDelay
+	}
 
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
@@ -343,6 +333,25 @@ func (a *Auth) recordFailure(ip string) time.Duration {
 	}
 
 	return delay
+}
+
+func (a *Auth) getLimiter(ip string) (*ipLimiter, bool) {
+	if value, ok := a.limiters.Load(ip); ok {
+		return value.(*ipLimiter), true
+	}
+	a.limiterMu.Lock()
+	defer a.limiterMu.Unlock()
+	if value, ok := a.limiters.Load(ip); ok {
+		return value.(*ipLimiter), true
+	}
+	if atomic.LoadInt64(&a.limiterCount) >= maxLimiterEntries {
+		return nil, false
+	}
+	now := time.Now()
+	lim := &ipLimiter{tokens: burstTokens, last: now, lastSeen: now}
+	a.limiters.Store(ip, lim)
+	atomic.AddInt64(&a.limiterCount, 1)
+	return lim, true
 }
 
 func (a *Auth) recordSuccess(ip string) {
@@ -364,8 +373,9 @@ func (a *Auth) recordSuccess(ip string) {
 }
 
 func (a *Auth) StartLimiterCleanup() {
-
+	a.cleanupWG.Add(1)
 	go func() {
+		defer a.cleanupWG.Done()
 
 		ticker := time.NewTicker(
 			limiterSweepEvery,
@@ -384,6 +394,7 @@ func (a *Auth) StartLimiterCleanup() {
 				)
 
 				removed := 0
+				a.limiterMu.Lock()
 
 				a.limiters.Range(func(key, value interface{}) bool {
 
@@ -398,12 +409,14 @@ func (a *Auth) StartLimiterCleanup() {
 					if stale {
 
 						a.limiters.Delete(key)
+						atomic.AddInt64(&a.limiterCount, -1)
 
 						removed++
 					}
 
 					return true
 				})
+				a.limiterMu.Unlock()
 
 				if removed > 0 {
 
@@ -424,8 +437,9 @@ func (a *Auth) StartLimiterCleanup() {
 }
 
 func (a *Auth) StartNonceCleanup() {
-
+	a.cleanupWG.Add(1)
 	go func() {
+		defer a.cleanupWG.Done()
 
 		ticker := time.NewTicker(
 			nonceSweepEvery,
@@ -466,6 +480,23 @@ func (a *Auth) StopCleanup() {
 	a.stopOnce.Do(func() {
 		close(a.stopCh)
 	})
+}
+
+func (a *Auth) WaitCleanup(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan struct{})
+	go func() {
+		a.cleanupWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (a *Auth) checkAndStoreNonce(
@@ -568,6 +599,7 @@ func (a *Auth) ServeHTTP(
 			},
 		)
 
+		w.Header().Set("Allow", http.MethodPost)
 		w.WriteHeader(
 			http.StatusMethodNotAllowed,
 		)
@@ -596,97 +628,37 @@ func (a *Auth) ServeHTTP(
 		return
 	}
 
-	r.Body = http.MaxBytesReader(
-		w,
-		r.Body,
-		maxBodyBytes,
-	)
-
-	if err := r.ParseForm(); err != nil {
-
-		logJSON(
-			"warn",
-			"request_too_large",
-			logFields{
-				"ip":  ip,
-				"err": err.Error(),
-			},
-		)
-
-		http.Error(
-			w,
-			"Request too large",
-			http.StatusRequestEntityTooLarge,
-		)
-
-		return
-	}
-
-	u := r.PostFormValue("username")
-	p := r.PostFormValue("password")
-	c := r.PostFormValue("pubkey")
-	tsStr := r.PostFormValue("timestamp")
-	nonce := r.PostFormValue("nonce")
-	signature := r.PostFormValue("signature")
-
-	if signature == "" {
-
-		http.Error(
-			w,
-			"Authentication failed",
-			http.StatusUnauthorized,
-		)
-
-		return
-	}
-
-	if !isValidNonce(nonce) {
-
-		http.Error(
-			w,
-			"Authentication failed",
-			http.StatusUnauthorized,
-		)
-
-		return
-	}
-
-	ts, err := strconv.ParseInt(
-		tsStr,
-		10,
-		64,
-	)
-
+	request, err := ParseAuthRequest(w, r, time.Now())
 	if err != nil {
-
-		http.Error(
-			w,
-			"Authentication failed",
-			http.StatusUnauthorized,
-		)
-
+		fields := logFields{"ip": ip, "err": err.Error()}
+		var validationErr *ValidationError
+		if errors.As(err, &validationErr) {
+			fields["field"] = validationErr.Field
+			fields["code"] = validationErr.Code
+		}
+		logJSON("warn", "auth_params_invalid", fields)
+		status := http.StatusUnauthorized
+		message := "Authentication failed"
+		if validationErr != nil {
+			status = validationErr.Status
+			if status == http.StatusBadRequest {
+				message = "Invalid request"
+			} else if status == http.StatusRequestEntityTooLarge {
+				message = "Request too large"
+			}
+		}
+		http.Error(w, message, status)
 		return
 	}
-
-	if delta := time.Since(
-		time.Unix(ts, 0),
-	); delta > allowedTimeSkew ||
-		delta < -allowedTimeSkew {
-
-		http.Error(
-			w,
-			"Authentication failed",
-			http.StatusUnauthorized,
-		)
-
-		return
-	}
+	u, p, c := request.Username, request.Password, request.PubKey
+	tsStr, nonce, signature := request.TimestampRaw, request.Nonce, request.Signature
 
 	ok := false
 
 	if pwHash, exists := a.db[u]; exists {
 
-		valid, err := verifyPassword(
+		valid, err := verifyPasswordContext(
+			r.Context(),
 			p,
 			pwHash,
 		)
@@ -720,12 +692,10 @@ func (a *Auth) ServeHTTP(
 					provided,
 				) {
 
-					now := time.Now()
-
 					if a.checkAndStoreNonce(
 						u,
 						nonce,
-						now,
+						time.Now(),
 					) {
 
 						ok = true
@@ -749,7 +719,13 @@ func (a *Auth) ServeHTTP(
 		)
 
 		if failDelay > 0 {
-			time.Sleep(failDelay)
+			timer := time.NewTimer(failDelay)
+			select {
+			case <-timer.C:
+			case <-r.Context().Done():
+				timer.Stop()
+				return
+			}
 		}
 
 		http.Error(
@@ -811,7 +787,10 @@ func (a *Auth) ServeHTTP(
 	select {
 
 	case resp := <-job.Data:
-
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		_, err := w.Write(
 			[]byte(resp),
 		)

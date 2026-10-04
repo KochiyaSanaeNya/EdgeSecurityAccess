@@ -12,20 +12,19 @@ import (
 type logFields map[string]interface{}
 
 func logJSON(level, msg string, fields logFields) {
-	if fields == nil {
-		fields = logFields{}
-	}
-	fields["ts"] = time.Now().UTC().Format(time.RFC3339)
-	fields["level"] = level
-	fields["msg"] = msg
-
+	entry := make(logFields, len(fields)+3)
 	for k, v := range fields {
 		if s, ok := v.(string); ok {
-			fields[k] = sanitizeLogValue(s)
+			entry[k] = sanitizeLogValue(s)
+		} else {
+			entry[k] = v
 		}
 	}
+	entry["ts"] = time.Now().UTC().Format(time.RFC3339)
+	entry["level"] = level
+	entry["msg"] = msg
 
-	b, err := json.Marshal(fields)
+	b, err := json.Marshal(entry)
 	if err != nil {
 		log.Printf("log marshal failed: %v", err)
 		return

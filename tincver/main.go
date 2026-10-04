@@ -96,15 +96,12 @@ func deliver(
 	default:
 	}
 
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
 	select {
-
 	case job.Data <- msg:
-
 	case <-ctx.Done():
-
-	case <-time.After(
-		500 * time.Millisecond,
-	):
+	case <-timer.C:
 	}
 }
 
