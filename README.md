@@ -7,6 +7,8 @@
   [Notice Board](https://blog.sanaenya.com/esa)  
   [Development Updates](https://esadevstatus.122244.xyz)  
   
+  **The commit message may not fully reflect the results of the development work; please visit the release page to view the changelog, which will be published shortly after the update is released.**
+  
   **We have now rewritten the project in collaboration with coding agents. Manual testing has not yet been completed.**
   
   **After the ESA test is completed, a branch merge operation will be initiated, and the operation guide will be rewritten at that time.**  
